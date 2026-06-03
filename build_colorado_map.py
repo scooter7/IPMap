@@ -61,13 +61,18 @@ for i, row in enumerate(emp_ws.iter_rows(values_only=True)):
     zip_str = ''
     if zip5 not in (None, ''):
         zip_str = str(zip5).split('.')[0].zfill(5)
+    zip4_str = ''
+    if zip4 not in (None, ''):
+        zip4_str = str(zip4).split('.')[0].zfill(4)
     employers.append({
         'id': len(employers),
-        'name': str(name).strip(),
-        'address': str(addr).strip() if addr else '',
-        'city': str(city).strip() if city else '',
-        'state': 'CO',
-        'zip': zip_str,
+        'name': str(name).strip(),              # Contact Company name
+        'address': str(addr).strip() if addr else '',   # Contact Address
+        'city': str(city).strip() if city else '',      # Contact City
+        'state': 'CO',                          # normalized for geocoding
+        'state_orig': str(state).strip() if state else '',  # Contact State (verbatim)
+        'zip': zip_str,                         # Contact Zip
+        'zip4': zip4_str,                       # Contact Zip4
     })
 print(f"  {len(employers)} employers")
 
@@ -166,9 +171,50 @@ for e in missing:
         pass
 print(f"  total geocoded employers: {len(emp_coords)}/{len(employers)}")
 
+# Stage 3: Nominatim (rural-friendly) then ZIP-centroid for stubborn addresses.
+import re, time
+def zip5(z):
+    m = re.search(r'\d{5}', z or '')
+    return m.group(0) if m else ''
+
+emp_precision = {rid: 'rooftop' for rid in emp_coords}   # default; zip-centroid marked below
+still_missing = [e for e in employers if str(e['id']) not in emp_coords]
+print(f"  {len(still_missing)} still missing; trying Nominatim + ZIP centroid...")
+for e in still_missing:
+    rid, z = str(e['id']), zip5(e['zip'])
+    # 3a. Nominatim structured search (rooftop/street precision)
+    try:
+        params = urllib.parse.urlencode({
+            'street': e['address'], 'city': e['city'], 'state': 'CO',
+            'postalcode': z, 'country': 'USA', 'format': 'json', 'limit': 1})
+        req = urllib.request.Request(
+            'https://nominatim.openstreetmap.org/search?' + params,
+            headers={'User-Agent': 'IPMap-geocoder/1.0 (cyberpracticesolutions@gmail.com)'})
+        with urllib.request.urlopen(req, timeout=25, context=SSL_CTX) as resp:
+            arr = json.loads(resp.read())
+        time.sleep(1.1)  # Nominatim usage policy: <=1 req/sec
+        if arr:
+            emp_coords[rid] = (float(arr[0]['lat']), float(arr[0]['lon']))
+            emp_precision[rid] = 'rooftop'
+            continue
+    except Exception:
+        pass
+    # 3b. ZIP centroid (approximate — uses the address's own ZIP, so KS etc. resolve correctly)
+    if z:
+        try:
+            with urllib.request.urlopen(f'https://api.zippopotam.us/us/{z}', timeout=15, context=SSL_CTX) as resp:
+                d = json.loads(resp.read())
+            pl = d['places'][0]
+            emp_coords[rid] = (float(pl['latitude']), float(pl['longitude']))
+            emp_precision[rid] = 'zip'
+        except Exception:
+            pass
+print(f"  total geocoded employers now: {len(emp_coords)}/{len(employers)}")
+
 for e in employers:
     coord = emp_coords.get(str(e['id']))
     e['lat'], e['lon'] = (coord if coord else (None, None))
+    e['precision'] = emp_precision.get(str(e['id']), 'rooftop')
 
 # ── 3. Geolocate IPs via ipinfo.io batch ──────────────────────────────────────
 print("Geolocating IPs (ipinfo batch)...")
@@ -227,33 +273,51 @@ for ip in unique_ips:
         km = haversine(g['lat'], g['lon'], e['lat'], e['lon'])
         if best_km is None or km < best_km:
             best, best_km = e, km
+    conf = confidence(best_km)
+    emp_prec = best['precision'] if best else 'rooftop'
+    # ZIP-centroid employers are only neighborhood-accurate; don't claim a High match to them.
+    if emp_prec == 'zip' and conf == 'high':
+        conf = 'medium'
     points.append({
         'ip': ip,
         'clicks': ip_clicks[ip],
         'lat': g['lat'], 'lon': g['lon'],
         'city': g['city'], 'region': g['region'], 'org': g['org'],
         'employer': best['name'] if best else '',
+        'emp_id': best['id'] if best else None,
         'emp_addr': f"{best['address']}, {best['city']}, CO {best['zip']}" if best else '',
+        'emp_address': best['address'] if best else '',
+        'emp_city': best['city'] if best else '',
+        'emp_state': (best['state_orig'] or 'Colorado') if best else '',
+        'emp_zip': best['zip'] if best else '',
+        'emp_zip4': best['zip4'] if best else '',
         'emp_lat': best['lat'] if best else None,
         'emp_lon': best['lon'] if best else None,
+        'emp_precision': emp_prec,
         'dist_km': round(best_km, 2) if best_km is not None else None,
         'dist_mi': round(best_km * 0.621371, 2) if best_km is not None else None,
-        'conf': confidence(best_km),
+        'conf': conf,
     })
 
 points.sort(key=lambda p: -p['clicks'])
 matched = sum(1 for p in points if p['conf'] in ('high', 'medium'))
 print(f"  {len(points)} mapped IPs, {matched} high/medium-confidence employer matches")
 
-# Per-employer aggregation
-emp_agg = defaultdict(lambda: {'clicks': 0, 'ips': 0})
+# Per-employer rollup — seed ALL employers (so the entire employers tab is captured),
+# then add high/medium-confidence matched clicks.
+emp_agg = {}
+for e in employers:
+    emp_agg[e['id']] = {
+        'employer': e['name'], 'clicks': 0, 'ips': 0,
+        'address': e['address'], 'city': e['city'],
+        'state': e['state_orig'] or 'Colorado', 'zip': e['zip'], 'zip4': e['zip4'],
+    }
 for p in points:
-    if p['employer'] and p['conf'] in ('high', 'medium'):
-        emp_agg[p['employer']]['clicks'] += p['clicks']
-        emp_agg[p['employer']]['ips'] += 1
-emp_summary = sorted(
-    ([k, v['clicks'], v['ips']] for k, v in emp_agg.items()),
-    key=lambda x: -x[1])
+    if p['emp_id'] is not None and p['conf'] in ('high', 'medium'):
+        a = emp_agg[p['emp_id']]
+        a['clicks'] += p['clicks']
+        a['ips'] += 1
+emp_summary = sorted(emp_agg.values(), key=lambda x: (-x['clicks'], x['employer']))
 
 # ── 5. Emit HTML ──────────────────────────────────────────────────────────────
 print("Writing HTML dashboard...")

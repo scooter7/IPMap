@@ -52,6 +52,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   td.clicks .badge { display: inline-block; background: #2ea04322; color: #56d364; border: 1px solid #2ea04344; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
   td.emp { max-width: 230px; }
   td.emp .name { color: #f0f6fc; font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.emp .addr { color: #adbac7; font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.emp .meta { color: #8b949e; font-size: 10px; margin-top: 1px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
   .c-high  { background: #3fb950; } .c-medium { background: #d29922; }
@@ -183,7 +184,7 @@ DATA.forEach((d, i) => {
   m.bindPopup(`
     <div class="popup-ip">${d.ip}</div>
     <div class="popup-detail">${loc}${d.org ? ' &middot; ' + d.org : ''}</div>
-    ${d.employer ? `<div class="popup-emp">${d.employer}</div><div class="popup-detail">${d.emp_addr}</div>` : ''}
+    ${d.employer ? `<div class="popup-emp">${d.employer}</div><div class="popup-detail">${d.emp_addr}${d.emp_precision === 'zip' ? ' <i>(approx. ZIP-level)</i>' : ''}</div>` : ''}
     <div class="popup-clicks">&#128432; ${d.clicks} click${d.clicks !== 1 ? 's' : ''}</div>
     <div class="popup-conf" style="color:${color}">${CONF_LABEL[d.conf]} match${d.dist_mi != null ? ' &middot; ' + d.dist_mi + ' mi away' : ''}</div>
   `, { maxWidth: 320 });
@@ -224,8 +225,11 @@ function currentRows() {
       sortCol === 'ip' ? b.ip : sortCol === 'employer' ? (b.employer||'') : b.clicks));
     return rows;
   } else {
-    let rows = EMP_SUMMARY.map(r => ({ employer: r[0], clicks: r[1], ips: r[2] }));
-    if (q) rows = rows.filter(r => r.employer.toLowerCase().includes(q));
+    let rows = EMP_SUMMARY.slice();
+    if (q) rows = rows.filter(r =>
+      r.employer.toLowerCase().includes(q)
+      || (r.address || '').toLowerCase().includes(q)
+      || (r.city || '').toLowerCase().includes(q));
     rows.sort((a, b) => cmp(
       sortCol === 'employer' ? a.employer : sortCol === 'ips' ? a.ips : a.clicks,
       sortCol === 'employer' ? b.employer : sortCol === 'ips' ? b.ips : b.clicks));
@@ -244,8 +248,8 @@ function render() {
   tbody.innerHTML = '';
   document.getElementById('result-count').textContent =
     view === 'ips'
-      ? `${rows.length} IP${rows.length !== 1 ? 's' : ''} &middot; ${rows.reduce((s,r)=>s+r.clicks,0)} clicks`.replace('&middot;', '·')
-      : `${rows.length} employer${rows.length !== 1 ? 's' : ''} with matched clicks`;
+      ? `${rows.length} IP${rows.length !== 1 ? 's' : ''} · ${rows.reduce((s,r)=>s+r.clicks,0)} clicks`
+      : `${rows.length} employer${rows.length !== 1 ? 's' : ''} · ${rows.filter(r=>r.clicks>0).length} with matched clicks`;
   const frag = document.createDocumentFragment();
   rows.forEach(d => {
     const tr = document.createElement('tr');
@@ -255,6 +259,7 @@ function render() {
         <td class="ip">${d.ip}</td>
         <td class="emp">
           <div class="name" title="${d.employer || '—'}">${d.employer || '—'}</div>
+          <div class="addr" title="${d.emp_addr || ''}">${d.emp_addr || ''}${d.emp_precision === 'zip' ? ' (approx.)' : ''}</div>
           <div class="meta"><span class="dot c-${d.conf}"></span><span class="conf-label">${CONF_LABEL[d.conf]}</span>${d.dist_mi != null ? ' · ' + d.dist_mi + ' mi' : ''}</div>
         </td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
@@ -266,8 +271,12 @@ function render() {
         if (m) { map.setView([d.lat, d.lon], 12, { animate: true }); markers.zoomToShowLayer(m, () => m.openPopup()); drawConnector(d); }
       });
     } else {
+      const eaddr = [d.address, d.city, d.state, [d.zip, d.zip4].filter(Boolean).join('-')].filter(Boolean).join(', ');
       tr.innerHTML = `
-        <td class="emp"><div class="name" title="${d.employer}">${d.employer}</div></td>
+        <td class="emp">
+          <div class="name" title="${d.employer}">${d.employer}</div>
+          <div class="addr" title="${eaddr}">${eaddr}</div>
+        </td>
         <td class="clicks" style="color:#8b949e">${d.ips}</td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
       tr.addEventListener('click', () => {
@@ -321,11 +330,11 @@ document.getElementById('download-btn').addEventListener('click', () => {
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   let headers, lines;
   if (view === 'ips') {
-    headers = ['IP','Clicks','Matched Employer','Employer Address','Distance (mi)','Confidence','IP City','IP Region','IP Org'];
-    lines = currentRows().map(d => [d.ip, d.clicks, d.employer, d.emp_addr, d.dist_mi, CONF_LABEL[d.conf], d.city, d.region, d.org].map(esc).join(','));
+    headers = ['IP','Clicks','Matched Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Match Distance (mi)','Match Confidence','Employer Geocode Precision','IP City','IP Region','IP Org / ISP','IP Latitude','IP Longitude','Employer Latitude','Employer Longitude'];
+    lines = currentRows().map(d => [d.ip, d.clicks, d.employer, d.emp_address, d.emp_city, d.emp_state, d.emp_zip, d.emp_zip4, d.dist_mi, CONF_LABEL[d.conf], d.emp_precision, d.city, d.region, d.org, d.lat, d.lon, d.emp_lat, d.emp_lon].map(esc).join(','));
   } else {
-    headers = ['Employer','Matched IPs','Total Clicks'];
-    lines = currentRows().map(d => [d.employer, d.ips, d.clicks].map(esc).join(','));
+    headers = ['Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Matched IPs','Total Clicks'];
+    lines = currentRows().map(d => [d.employer, d.address, d.city, d.state, d.zip, d.zip4, d.ips, d.clicks].map(esc).join(','));
   }
   const csv = [headers.join(','), ...lines].join('\n');
   const a = document.createElement('a');
