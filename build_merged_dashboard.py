@@ -32,7 +32,8 @@ SOURCES = [
 
 def norm_colorado_point(p):
     return {
-        'ip': p['ip'], 'clicks': p['clicks'], 'lat': p['lat'], 'lon': p['lon'],
+        'ip': p['ip'], 'clicks': p['clicks'], 'impr': p.get('impr'),
+        'lat': p['lat'], 'lon': p['lon'],
         'city': p.get('city', ''), 'region': p.get('region', ''), 'org': p.get('org', ''),
         'hostname': '',
         'company': p.get('employer', ''), 'comp_id': p.get('emp_id'),
@@ -71,6 +72,7 @@ def norm_colorado_stats(st):
         'mapped_ips': st['mapped_ips'], 'matched': st['matched'],
         'geocoded_companies': st.get('geocoded_employers', st.get('geocoded_companies', 0)),
         'domain': 0,
+        'total_impr': st.get('total_impr', 0),
     }
 
 campaigns, order = {}, []

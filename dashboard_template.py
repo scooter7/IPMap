@@ -72,6 +72,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <header>
   <h1>&#127758; Colorado Clicks &rarr; Employer Map</h1>
   <div class="stat">Total Clicks <span id="s-clicks"></span></div>
+  <div class="stat">Total Impressions <span id="s-impr"></span></div>
   <div class="stat">Unique IPs <span id="s-ips"></span></div>
   <div class="stat">Mapped <span id="s-mapped"></span></div>
   <div class="stat">Employers <span id="s-emp"></span></div>
@@ -110,6 +111,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <tr>
             <th data-col="ip">IP</th>
             <th data-col="employer">Matched Employer</th>
+            <th data-col="impr">Impr</th>
             <th data-col="clicks" class="sorted">Clicks &#9660;</th>
           </tr>
         </thead>
@@ -117,6 +119,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <tr>
             <th data-col="employer">Employer</th>
             <th data-col="ips">IPs</th>
+            <th data-col="impr">Impr</th>
             <th data-col="clicks" class="sorted">Clicks &#9660;</th>
           </tr>
         </thead>
@@ -134,7 +137,9 @@ const EMPLOYERS = /*__EMPLOYERS__*/;
 const EMP_SUMMARY = /*__EMP_SUMMARY__*/;
 const STATS = /*__STATS__*/;
 
+const fmtImpr = v => (v == null || v === 0) ? '—' : Number(v).toLocaleString();
 document.getElementById('s-clicks').textContent  = STATS.total_clicks.toLocaleString();
+document.getElementById('s-impr').textContent    = (STATS.total_impr || 0).toLocaleString();
 document.getElementById('s-ips').textContent     = STATS.unique_ips.toLocaleString();
 document.getElementById('s-mapped').textContent  = STATS.mapped_ips.toLocaleString();
 document.getElementById('s-emp').textContent     = STATS.geocoded_employers.toLocaleString();
@@ -220,9 +225,8 @@ function currentRows() {
         || (d.city || '').toLowerCase().includes(q)
         || (d.org || '').toLowerCase().includes(q);
     });
-    rows.sort((a, b) => cmp(
-      sortCol === 'ip' ? a.ip : sortCol === 'employer' ? (a.employer||'') : a.clicks,
-      sortCol === 'ip' ? b.ip : sortCol === 'employer' ? (b.employer||'') : b.clicks));
+    const kf = d => sortCol === 'ip' ? d.ip : sortCol === 'employer' ? (d.employer||'') : sortCol === 'impr' ? (d.impr||0) : d.clicks;
+    rows.sort((a, b) => cmp(kf(a), kf(b)));
     return rows;
   } else {
     let rows = EMP_SUMMARY.slice();
@@ -230,9 +234,8 @@ function currentRows() {
       r.employer.toLowerCase().includes(q)
       || (r.address || '').toLowerCase().includes(q)
       || (r.city || '').toLowerCase().includes(q));
-    rows.sort((a, b) => cmp(
-      sortCol === 'employer' ? a.employer : sortCol === 'ips' ? a.ips : a.clicks,
-      sortCol === 'employer' ? b.employer : sortCol === 'ips' ? b.ips : b.clicks));
+    const kf = d => sortCol === 'employer' ? d.employer : sortCol === 'ips' ? d.ips : sortCol === 'impr' ? (d.impr||0) : d.clicks;
+    rows.sort((a, b) => cmp(kf(a), kf(b)));
     return rows;
   }
 }
@@ -262,6 +265,7 @@ function render() {
           <div class="addr" title="${d.emp_addr || ''}">${d.emp_addr || ''}${d.emp_precision === 'zip' ? ' (approx.)' : ''}</div>
           <div class="meta"><span class="dot c-${d.conf}"></span><span class="conf-label">${CONF_LABEL[d.conf]}</span>${d.dist_mi != null ? ' · ' + d.dist_mi + ' mi' : ''}</div>
         </td>
+        <td class="clicks" style="color:#8b949e">${fmtImpr(d.impr)}</td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
       tr.addEventListener('click', () => {
         activeId = d._id;
@@ -278,6 +282,7 @@ function render() {
           <div class="addr" title="${eaddr}">${eaddr}</div>
         </td>
         <td class="clicks" style="color:#8b949e">${d.ips}</td>
+        <td class="clicks" style="color:#8b949e">${fmtImpr(d.impr)}</td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
       tr.addEventListener('click', () => {
         document.getElementById('search').value = d.employer;
@@ -304,7 +309,7 @@ function bindHeader(id) {
     th.addEventListener('click', () => {
       const col = th.dataset.col;
       if (sortCol === col) sortAsc = !sortAsc;
-      else { sortCol = col; sortAsc = (col !== 'clicks' && col !== 'ips'); }
+      else { sortCol = col; sortAsc = !['clicks','ips','impr'].includes(col); }
       render();
     });
   });
@@ -330,11 +335,11 @@ document.getElementById('download-btn').addEventListener('click', () => {
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   let headers, lines;
   if (view === 'ips') {
-    headers = ['IP','Clicks','Matched Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Match Distance (mi)','Match Confidence','Employer Geocode Precision','IP City','IP Region','IP Org / ISP','IP Latitude','IP Longitude','Employer Latitude','Employer Longitude'];
-    lines = currentRows().map(d => [d.ip, d.clicks, d.employer, d.emp_address, d.emp_city, d.emp_state, d.emp_zip, d.emp_zip4, d.dist_mi, CONF_LABEL[d.conf], d.emp_precision, d.city, d.region, d.org, d.lat, d.lon, d.emp_lat, d.emp_lon].map(esc).join(','));
+    headers = ['IP','Clicks','Impressions','Matched Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Match Distance (mi)','Match Confidence','Employer Geocode Precision','IP City','IP Region','IP Org / ISP','IP Latitude','IP Longitude','Employer Latitude','Employer Longitude'];
+    lines = currentRows().map(d => [d.ip, d.clicks, d.impr, d.employer, d.emp_address, d.emp_city, d.emp_state, d.emp_zip, d.emp_zip4, d.dist_mi, CONF_LABEL[d.conf], d.emp_precision, d.city, d.region, d.org, d.lat, d.lon, d.emp_lat, d.emp_lon].map(esc).join(','));
   } else {
-    headers = ['Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Matched IPs','Total Clicks'];
-    lines = currentRows().map(d => [d.employer, d.address, d.city, d.state, d.zip, d.zip4, d.ips, d.clicks].map(esc).join(','));
+    headers = ['Employer (Company Name)','Employer Address','Employer City','Employer State','Employer Zip','Employer Zip4','Matched IPs','Total Clicks','Total Impressions'];
+    lines = currentRows().map(d => [d.employer, d.address, d.city, d.state, d.zip, d.zip4, d.ips, d.clicks, d.impr].map(esc).join(','));
   }
   const csv = [headers.join(','), ...lines].join('\n');
   const a = document.createElement('a');

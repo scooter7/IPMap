@@ -39,11 +39,20 @@ except Exception:
     SSL_CTX.check_hostname = False
     SSL_CTX.verify_mode = ssl.CERT_NONE
 
+import os
 import openpyxl
 from dashboard_template_apollo import HTML_TEMPLATE
 
-XLSX_PATH   = '/Users/scootervineburgh/Desktop/Kathi/Apollo Small.xlsx'
-OUTPUT_PATH = '/Users/scootervineburgh/Desktop/Kathi/apollo_click_map.html'
+BASE = '/Users/scootervineburgh/Desktop/Kathi'
+XLSX_PATH   = f'{BASE}/Apollo Small.xlsx'
+OUTPUT_PATH = f'{BASE}/apollo_click_map.html'
+
+CACHE_PATH = f'{BASE}/geo_cache.json'
+GEO_CACHE = json.load(open(CACHE_PATH)) if os.path.exists(CACHE_PATH) else {'ip': {}, 'addr': {}}
+GEO_CACHE.setdefault('ip', {}); GEO_CACHE.setdefault('addr', {})
+def save_cache():
+    json.dump(GEO_CACHE, open(CACHE_PATH, 'w'))
+IMPR = json.load(open(f'{BASE}/impressions_by_ip.json')) if os.path.exists(f'{BASE}/impressions_by_ip.json') else {}
 
 IPINFO_TOKEN     = '359b803b357850'
 IPINFO_BATCH_URL = f'https://ipinfo.io/batch?token={IPINFO_TOKEN}'
@@ -196,8 +205,16 @@ def census_batch(records):
                 pass
     return out
 
+def addr_key(c):
+    return f"{c['address']}|{c['city']}|{c['zip']}"
+
 coords, precision = {}, {}
-batchable = [c for c in companies if c['address']]   # Census needs a street address
+for c in companies:                              # cache pre-pass
+    hit = GEO_CACHE['addr'].get(addr_key(c))
+    if hit:
+        coords[str(c['id'])] = (hit[0], hit[1]); precision[str(c['id'])] = hit[2]
+print(f"  {len(coords)}/{len(companies)} from cache")
+batchable = [c for c in companies if c['address'] and str(c['id']) not in coords]  # Census needs a street address
 recs = [(str(c['id']), c['address'], c['city'],
          STATE_ABBR.get(c['state'].lower(), c['state']), c['zip']) for c in batchable]
 for s in range(0, len(recs), 1000):
@@ -250,28 +267,40 @@ for c in companies:
     xy = coords.get(str(c['id']))
     c['lat'], c['lon'] = (xy if xy else (None, None))
     c['precision'] = precision.get(str(c['id']), 'rooftop')
+    if xy:
+        GEO_CACHE['addr'][addr_key(c)] = [xy[0], xy[1], c['precision']]
+save_cache()
 
 geo_comps = [c for c in companies if c['lat'] is not None]
 
 # ── 4. Geolocate IPs (ipinfo) + reverse DNS ───────────────────────────────────
 print("Geolocating IPs (ipinfo)...")
 geo = {}
-req = urllib.request.Request(IPINFO_BATCH_URL, data=json.dumps(unique_ips).encode(),
-    headers={'Content-Type': 'application/json'})
-try:
-    with urllib.request.urlopen(req, timeout=60, context=SSL_CTX) as resp:
-        results = json.loads(resp.read())
-    for ip, e in results.items():
-        if isinstance(e, dict) and 'loc' in e:
-            lat, lon = e['loc'].split(',')
-            org = e.get('org', '')
-            if org.startswith('AS'):
-                org = org.split(' ', 1)[1] if ' ' in org else org
-            geo[ip] = {'lat': float(lat), 'lon': float(lon),
-                       'city': e.get('city', ''), 'region': e.get('region', ''),
-                       'org': org, 'hostname': e.get('hostname', '')}
-except Exception as exc:
-    print(f"  ipinfo error: {exc}")
+for ip in unique_ips:                            # cache pre-pass
+    c = GEO_CACHE['ip'].get(ip)
+    if c and c.get('lat') is not None:
+        geo[ip] = {'lat': c['lat'], 'lon': c['lon'], 'city': c.get('city', ''),
+                   'region': c.get('region', ''), 'org': c.get('org', ''),
+                   'hostname': c.get('hostname', '')}
+ip_todo = [ip for ip in unique_ips if ip not in geo]
+print(f"  {len(geo)}/{len(unique_ips)} from cache; {len(ip_todo)} to look up")
+if ip_todo:
+    req = urllib.request.Request(IPINFO_BATCH_URL, data=json.dumps(ip_todo).encode(),
+        headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60, context=SSL_CTX) as resp:
+            results = json.loads(resp.read())
+        for ip, e in results.items():
+            if isinstance(e, dict) and 'loc' in e:
+                lat, lon = e['loc'].split(',')
+                org = e.get('org', '')
+                if org.startswith('AS'):
+                    org = org.split(' ', 1)[1] if ' ' in org else org
+                geo[ip] = {'lat': float(lat), 'lon': float(lon),
+                           'city': e.get('city', ''), 'region': e.get('region', ''),
+                           'org': org, 'hostname': e.get('hostname', '')}
+    except Exception as exc:
+        print(f"  ipinfo error: {exc}")
 print(f"  geolocated {len(geo)}/{len(unique_ips)}")
 
 print("Reverse-DNS lookups...")
@@ -281,12 +310,22 @@ def rdns(ip):
         return ip, socket.gethostbyaddr(ip)[0].lower()
     except Exception:
         return ip, ''
-with ThreadPoolExecutor(max_workers=20) as ex:
-    host_map = dict(ex.map(rdns, unique_ips))
+# use cached hostname where present; only PTR-lookup the rest
+host_map = {ip: (GEO_CACHE['ip'].get(ip, {}).get('hostname') or '') for ip in unique_ips}
+rdns_todo = [ip for ip in unique_ips if not host_map.get(ip)]
+if rdns_todo:
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        for ip, host in ex.map(rdns, rdns_todo):
+            host_map[ip] = host
 # prefer ipinfo hostname when local PTR is empty
 for ip in unique_ips:
     if not host_map.get(ip) and geo.get(ip, {}).get('hostname'):
         host_map[ip] = geo[ip]['hostname'].lower()
+# persist IP geo + hostname to cache
+for ip in unique_ips:
+    if ip in geo:
+        GEO_CACHE['ip'][ip] = {**geo[ip], 'hostname': host_map.get(ip, '')}
+save_cache()
 n_host = sum(1 for v in host_map.values() if v)
 print(f"  {n_host}/{len(unique_ips)} IPs have a hostname")
 
@@ -355,7 +394,7 @@ for ip in unique_ips:
         dist_km = haversine(g['lat'], g['lon'], match['lat'], match['lon'])
 
     points.append({
-        'ip': ip, 'clicks': ip_clicks[ip],
+        'ip': ip, 'clicks': ip_clicks[ip], 'impr': IMPR.get(ip),
         'lat': g['lat'], 'lon': g['lon'],
         'city': g['city'], 'region': g['region'], 'org': g['org'], 'hostname': host,
         'company': match['name'] if match else '',
@@ -389,7 +428,7 @@ print(f"  {len(points)} mapped IPs | {n_domain} domain, {n_org} org, "
 comp_agg = {}
 for c in companies:
     comp_agg[c['id']] = {
-        'company': c['name'], 'website': c['website'], 'clicks': 0, 'ips': 0,
+        'company': c['name'], 'website': c['website'], 'clicks': 0, 'ips': 0, 'impr': 0,
         'address': c['address'], 'city': c['city'], 'state': c['state'],
         'country': c['country'], 'zip': c['zip'], 'zip4': c['zip4'],
     }
@@ -398,6 +437,7 @@ for p in points:
         a = comp_agg[p['comp_id']]
         a['clicks'] += p['clicks']
         a['ips'] += 1
+        a['impr'] += p['impr'] or 0
 comp_summary = sorted(comp_agg.values(), key=lambda x: (-x['clicks'], x['company']))
 
 # ── 6. Emit HTML ──────────────────────────────────────────────────────────────
@@ -410,6 +450,7 @@ stats = {
     'geocoded_companies': len(geo_comps),
     'matched': matched,
     'domain': n_domain,
+    'total_impr': sum(p['impr'] or 0 for p in points),
 }
 html = (HTML_TEMPLATE
         .replace('/*__POINTS__*/', json.dumps(points))

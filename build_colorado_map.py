@@ -33,11 +33,21 @@ except Exception:
     SSL_CTX.check_hostname = False
     SSL_CTX.verify_mode = ssl.CERT_NONE
 
+import os
 import openpyxl
 from dashboard_template import HTML_TEMPLATE
 
-XLSX_PATH   = '/Users/scootervineburgh/Desktop/Kathi/Colorado Small.xlsx'
-OUTPUT_PATH = '/Users/scootervineburgh/Desktop/Kathi/colorado_click_map.html'
+BASE = '/Users/scootervineburgh/Desktop/Kathi'
+XLSX_PATH   = f'{BASE}/Colorado Small.xlsx'
+OUTPUT_PATH = f'{BASE}/colorado_click_map.html'
+
+# Geocode cache (avoids re-hitting Census/Nominatim on every rebuild) + impressions lookup
+CACHE_PATH = f'{BASE}/geo_cache.json'
+GEO_CACHE = json.load(open(CACHE_PATH)) if os.path.exists(CACHE_PATH) else {'ip': {}, 'addr': {}}
+GEO_CACHE.setdefault('ip', {}); GEO_CACHE.setdefault('addr', {})
+def save_cache():
+    json.dump(GEO_CACHE, open(CACHE_PATH, 'w'))
+IMPR = json.load(open(f'{BASE}/impressions_by_ip.json')) if os.path.exists(f'{BASE}/impressions_by_ip.json') else {}
 
 IPINFO_TOKEN     = '359b803b357850'
 IPINFO_BATCH_URL = f'https://ipinfo.io/batch?token={IPINFO_TOKEN}'
@@ -142,10 +152,22 @@ def census_batch(records):
                 pass
     return out
 
+def addr_key(e):
+    return f"{e['address']}|{e['city']}|{e['zip']}"
+
 emp_coords = {}
+cached_prec = {}
+for e in employers:                              # cache pre-pass — skip geocoding APIs on hits
+    hit = GEO_CACHE['addr'].get(addr_key(e))
+    if hit:
+        emp_coords[str(e['id'])] = (hit[0], hit[1])
+        cached_prec[str(e['id'])] = hit[2]
+print(f"  {len(emp_coords)}/{len(employers)} from cache")
+
 BATCH = 1000
-for start in range(0, len(employers), BATCH):
-    chunk = employers[start:start + BATCH]
+uncached = [e for e in employers if str(e['id']) not in emp_coords]
+for start in range(0, len(uncached), BATCH):
+    chunk = uncached[start:start + BATCH]
     recs = [(str(e['id']), e['address'], e['city'], e['state'], e['zip']) for e in chunk]
     try:
         res = census_batch(recs)
@@ -178,6 +200,7 @@ def zip5(z):
     return m.group(0) if m else ''
 
 emp_precision = {rid: 'rooftop' for rid in emp_coords}   # default; zip-centroid marked below
+emp_precision.update(cached_prec)
 still_missing = [e for e in employers if str(e['id']) not in emp_coords]
 print(f"  {len(still_missing)} still missing; trying Nominatim + ZIP centroid...")
 for e in still_missing:
@@ -215,12 +238,22 @@ for e in employers:
     coord = emp_coords.get(str(e['id']))
     e['lat'], e['lon'] = (coord if coord else (None, None))
     e['precision'] = emp_precision.get(str(e['id']), 'rooftop')
+    if coord:                                    # write back to cache
+        GEO_CACHE['addr'][addr_key(e)] = [coord[0], coord[1], e['precision']]
+save_cache()
 
 # ── 3. Geolocate IPs via ipinfo.io batch ──────────────────────────────────────
 print("Geolocating IPs (ipinfo batch)...")
 geo = {}
-for start in range(0, len(unique_ips), IPINFO_BATCH_SIZE):
-    batch = unique_ips[start:start + IPINFO_BATCH_SIZE]
+for ip in unique_ips:                            # cache pre-pass
+    c = GEO_CACHE['ip'].get(ip)
+    if c:
+        geo[ip] = {'lat': c['lat'], 'lon': c['lon'], 'city': c.get('city', ''),
+                   'region': c.get('region', ''), 'org': c.get('org', '')}
+ip_todo = [ip for ip in unique_ips if ip not in geo]
+print(f"  {len(geo)}/{len(unique_ips)} IPs from cache; {len(ip_todo)} to look up")
+for start in range(0, len(ip_todo), IPINFO_BATCH_SIZE):
+    batch = ip_todo[start:start + IPINFO_BATCH_SIZE]
     req = urllib.request.Request(
         IPINFO_BATCH_URL, data=json.dumps(batch).encode(),
         headers={'Content-Type': 'application/json'})
@@ -240,9 +273,11 @@ for start in range(0, len(unique_ips), IPINFO_BATCH_SIZE):
                     'city': entry.get('city', ''), 'region': entry.get('region', ''),
                     'org': org,
                 }
+                GEO_CACHE['ip'][ip] = {**geo[ip], 'hostname': ''}
     except Exception as exc:
         print(f"  batch {start} error: {exc}")
     print(f"  geolocated {len(geo)}/{len(unique_ips)} IPs")
+save_cache()
 
 # ── 4. Match each IP to nearest employer ──────────────────────────────────────
 print("Matching IPs to nearest employer...")
@@ -281,6 +316,7 @@ for ip in unique_ips:
     points.append({
         'ip': ip,
         'clicks': ip_clicks[ip],
+        'impr': IMPR.get(ip),                    # total impressions for this IP (None if no data)
         'lat': g['lat'], 'lon': g['lon'],
         'city': g['city'], 'region': g['region'], 'org': g['org'],
         'employer': best['name'] if best else '',
@@ -308,7 +344,7 @@ print(f"  {len(points)} mapped IPs, {matched} high/medium-confidence employer ma
 emp_agg = {}
 for e in employers:
     emp_agg[e['id']] = {
-        'employer': e['name'], 'clicks': 0, 'ips': 0,
+        'employer': e['name'], 'clicks': 0, 'ips': 0, 'impr': 0,
         'address': e['address'], 'city': e['city'],
         'state': e['state_orig'] or 'Colorado', 'zip': e['zip'], 'zip4': e['zip4'],
     }
@@ -317,6 +353,7 @@ for p in points:
         a = emp_agg[p['emp_id']]
         a['clicks'] += p['clicks']
         a['ips'] += 1
+        a['impr'] += p['impr'] or 0
 emp_summary = sorted(emp_agg.values(), key=lambda x: (-x['clicks'], x['employer']))
 
 # ── 5. Emit HTML ──────────────────────────────────────────────────────────────
@@ -329,6 +366,7 @@ stats = {
     'employers': len(employers),
     'geocoded_employers': len(geo_emps),
     'matched': matched,
+    'total_impr': sum(p['impr'] or 0 for p in points),
 }
 html = (HTML_TEMPLATE
         .replace('/*__POINTS__*/', json.dumps(points))

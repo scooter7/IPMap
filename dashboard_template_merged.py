@@ -83,6 +83,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <header>
   <h1>&#127758; Campaign Clicks &rarr; Target Map</h1>
   <div class="stat">Total Clicks <span id="s-clicks"></span></div>
+  <div class="stat">Total Impressions <span id="s-impr"></span></div>
   <div class="stat">Unique IPs <span id="s-ips"></span></div>
   <div class="stat"><span id="s-tnoun">Targets</span> <span id="s-emp"></span></div>
   <div class="stat">Domain-verified <span id="s-domain"></span></div>
@@ -124,6 +125,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <tr>
             <th data-col="ip">IP</th>
             <th data-col="company" id="th-ip-target">Matched Target</th>
+            <th data-col="impr">Impr</th>
             <th data-col="clicks" class="sorted">Clicks &#9660;</th>
           </tr>
         </thead>
@@ -131,6 +133,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <tr>
             <th data-col="company" id="th-emp-target">Target</th>
             <th data-col="ips">IPs</th>
+            <th data-col="impr">Impr</th>
             <th data-col="clicks" class="sorted">Clicks &#9660;</th>
           </tr>
         </thead>
@@ -154,6 +157,7 @@ function colorFor(d) {
   if (d.match_type === 'org') return '#2f81f7';
   return CONF_COLOR[d.conf] || '#6e7681';
 }
+const fmtImpr = v => (v == null || v === 0) ? '—' : Number(v).toLocaleString();
 const webUrl = w => w ? (/^https?:\/\//.test(w) ? w : 'https://' + w) : '';
 const webText = w => (w || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 
@@ -240,6 +244,7 @@ function loadCampaign(key) {
   DATA = c.points; TARGETS = c.targets; SUMMARY = c.summary; STATS = c.stats; TNOUN = c.targetNoun;
 
   document.getElementById('s-clicks').textContent  = STATS.total_clicks.toLocaleString();
+  document.getElementById('s-impr').textContent    = (STATS.total_impr || 0).toLocaleString();
   document.getElementById('s-ips').textContent     = STATS.unique_ips.toLocaleString();
   document.getElementById('s-emp').textContent     = STATS.geocoded_companies.toLocaleString();
   document.getElementById('s-domain').textContent  = (STATS.domain || 0).toLocaleString();
@@ -277,9 +282,8 @@ function currentRows() {
         || (d.org || '').toLowerCase().includes(q)
         || (d.hostname || '').toLowerCase().includes(q);
     });
-    rows.sort((a, b) => cmp(
-      sortCol === 'ip' ? a.ip : sortCol === 'company' ? (a.company||'') : a.clicks,
-      sortCol === 'ip' ? b.ip : sortCol === 'company' ? (b.company||'') : b.clicks));
+    const kf = d => sortCol === 'ip' ? d.ip : sortCol === 'company' ? (d.company||'') : sortCol === 'impr' ? (d.impr||0) : d.clicks;
+    rows.sort((a, b) => cmp(kf(a), kf(b)));
     return rows;
   } else {
     let rows = SUMMARY.slice();
@@ -288,9 +292,8 @@ function currentRows() {
       || (r.website || '').toLowerCase().includes(q)
       || (r.address || '').toLowerCase().includes(q)
       || (r.city || '').toLowerCase().includes(q));
-    rows.sort((a, b) => cmp(
-      sortCol === 'company' ? a.company : sortCol === 'ips' ? a.ips : a.clicks,
-      sortCol === 'company' ? b.company : sortCol === 'ips' ? b.ips : b.clicks));
+    const kf = d => sortCol === 'company' ? d.company : sortCol === 'ips' ? d.ips : sortCol === 'impr' ? (d.impr||0) : d.clicks;
+    rows.sort((a, b) => cmp(kf(a), kf(b)));
     return rows;
   }
 }
@@ -321,6 +324,7 @@ function render() {
             <span><span class="dot c-${d.conf}"></span><span class="conf-label">${CONF_LABEL[d.conf]}</span>${d.dist_mi != null ? ' · ' + d.dist_mi + ' mi' : ''}</span>
           </div>
         </td>
+        <td class="clicks" style="color:#8b949e">${fmtImpr(d.impr)}</td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
       tr.addEventListener('click', () => {
         activeId = d._id;
@@ -339,6 +343,7 @@ function render() {
           ${web ? `<div>${web}</div>` : ''}
         </td>
         <td class="clicks" style="color:#8b949e">${d.ips}</td>
+        <td class="clicks" style="color:#8b949e">${fmtImpr(d.impr)}</td>
         <td class="clicks"><span class="badge">${d.clicks}</span></td>`;
       tr.addEventListener('click', () => {
         document.getElementById('search').value = d.company;
@@ -365,7 +370,7 @@ function bindHeader(id) {
     th.addEventListener('click', () => {
       const col = th.dataset.col;
       if (sortCol === col) sortAsc = !sortAsc;
-      else { sortCol = col; sortAsc = (col !== 'clicks' && col !== 'ips'); }
+      else { sortCol = col; sortAsc = !['clicks','ips','impr'].includes(col); }
       render();
     });
   });
@@ -391,11 +396,11 @@ document.getElementById('download-btn').addEventListener('click', () => {
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   let headers, lines;
   if (view === 'ips') {
-    headers = ['IP','Clicks','Matched '+TNOUN,'Website','Street Address','City','State','Country','Zip','Zip4','Match Type','Match Confidence','Match Distance (mi)','Geocode Precision','IP Hostname','IP City','IP Region','IP Org / ISP','IP Latitude','IP Longitude',TNOUN+' Latitude',TNOUN+' Longitude'];
-    lines = currentRows().map(d => [d.ip, d.clicks, d.company, d.website, d.comp_address, d.comp_city, d.comp_state, d.comp_country, d.comp_zip, d.comp_zip4, MT_LABEL[d.match_type], CONF_LABEL[d.conf], d.dist_mi, d.comp_precision, d.hostname, d.city, d.region, d.org, d.lat, d.lon, d.comp_lat, d.comp_lon].map(esc).join(','));
+    headers = ['IP','Clicks','Impressions','Matched '+TNOUN,'Website','Street Address','City','State','Country','Zip','Zip4','Match Type','Match Confidence','Match Distance (mi)','Geocode Precision','IP Hostname','IP City','IP Region','IP Org / ISP','IP Latitude','IP Longitude',TNOUN+' Latitude',TNOUN+' Longitude'];
+    lines = currentRows().map(d => [d.ip, d.clicks, d.impr, d.company, d.website, d.comp_address, d.comp_city, d.comp_state, d.comp_country, d.comp_zip, d.comp_zip4, MT_LABEL[d.match_type], CONF_LABEL[d.conf], d.dist_mi, d.comp_precision, d.hostname, d.city, d.region, d.org, d.lat, d.lon, d.comp_lat, d.comp_lon].map(esc).join(','));
   } else {
-    headers = [TNOUN,'Website','Street Address','City','State','Country','Zip','Zip4','Matched IPs','Total Clicks'];
-    lines = currentRows().map(d => [d.company, d.website, d.address, d.city, d.state, d.country, d.zip, d.zip4, d.ips, d.clicks].map(esc).join(','));
+    headers = [TNOUN,'Website','Street Address','City','State','Country','Zip','Zip4','Matched IPs','Total Clicks','Total Impressions'];
+    lines = currentRows().map(d => [d.company, d.website, d.address, d.city, d.state, d.country, d.zip, d.zip4, d.ips, d.clicks, d.impr].map(esc).join(','));
   }
   const csv = [headers.join(','), ...lines].join('\n');
   const a = document.createElement('a');
