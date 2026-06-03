@@ -306,13 +306,18 @@ def dist_conf(km):
     return 'very-low'
 
 def org_match(org):
-    """Return a company whose name clearly appears in the IP's network-owner string."""
-    no = norm_name(org)
+    """Return a company whose FULL name appears as whole tokens in the IP's
+    network-owner string. Token-subset (not substring) matching avoids false hits
+    like ISP 'Pulse' matching company 'ProPulse'."""
     low = (org or '').lower()
-    if not no or any(w in low for w in ISP_WORDS):
+    org_tokens = set(norm_name(org).split())
+    if not org_tokens or any(w in low for w in ISP_WORDS):
         return None
     for cid, nn in comp_by_norm.items():
-        if len(nn) >= 6 and (nn in no or no in nn):
+        ctoks = set(nn.split())
+        # every company token must be a whole-word token in the org string,
+        # and the company must have a distinctive token (>=4 chars)
+        if ctoks and ctoks <= org_tokens and any(len(t) >= 4 for t in ctoks):
             return companies[cid]
     return None
 
